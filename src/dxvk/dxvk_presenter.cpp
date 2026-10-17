@@ -95,14 +95,21 @@ namespace dxvk {
     updateSwapChain();
 
     // Don't acquire if we already did so after present
-    if (m_acquireStatus == VK_NOT_READY && m_swapchain) {
-      PresenterSync sync = m_semaphores.at(m_frameIndex);
+    if ((m_acquireStatus == VK_NOT_READY || m_acquireStatus == VK_TIMEOUT) && m_swapchain) {
+      PresenterSync& sync = m_semaphores.at(m_frameIndex);
 
       waitForSwapchainFence(sync);
 
       m_acquireStatus = m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
         m_swapchain, std::numeric_limits<uint64_t>::max(),
         sync.acquire, VK_NULL_HANDLE, &m_imageIndex);
+    }
+
+    // Wine's managed child surfaces can return early to avoid blocking window
+    // updates. Keep the last frame and let the caller retry without recreating.
+    if (m_swapchain && (m_acquireStatus == VK_NOT_READY || m_acquireStatus == VK_TIMEOUT)) {
+      m_acquireStatus = VK_NOT_READY;
+      return VK_NOT_READY;
     }
 
     // This is a normal occurence, but may be useful for
@@ -122,11 +129,18 @@ namespace dxvk {
       if (vr != VK_SUCCESS)
         return softError(vr);
 
-      PresenterSync sync = m_semaphores.at(m_frameIndex);
+      PresenterSync& sync = m_semaphores.at(m_frameIndex);
 
       m_acquireStatus = m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
         m_swapchain, std::numeric_limits<uint64_t>::max(),
         sync.acquire, VK_NULL_HANDLE, &m_imageIndex);
+
+      // A fresh swapchain can also be temporarily unavailable. Do not expose
+      // an image or set m_presentPending until acquisition actually succeeds.
+      if (m_acquireStatus == VK_NOT_READY || m_acquireStatus == VK_TIMEOUT) {
+        m_acquireStatus = VK_NOT_READY;
+        return VK_NOT_READY;
+      }
 
       if (m_acquireStatus < 0) {
         Logger::info(str::format("Presenter: Got ", m_acquireStatus, " from fresh swapchain"));
@@ -842,6 +856,26 @@ namespace dxvk {
     swapInfo.imageSharingMode       = VK_SHARING_MODE_EXCLUSIVE;
     swapInfo.preTransform           = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     swapInfo.compositeAlpha         = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+
+    // Layered overlay (WINE_LAYERED_OVERLAY_ALPHA): request per-pixel alpha compositing
+    // so transparent regions show the desktop instead of an opaque black box. The value
+    // selects the blend mode for testing without a rebuild: 1 = premultiplied, 2 = straight.
+    if (std::string overlayAlpha = env::getEnvVar("WINE_LAYERED_OVERLAY_ALPHA"); !overlayAlpha.empty()) {
+      VkCompositeAlphaFlagsKHR supported = caps.surfaceCapabilities.supportedCompositeAlpha;
+      VkCompositeAlphaFlagBitsKHR want = (overlayAlpha == "2")
+        ? VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR : VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+      VkCompositeAlphaFlagBitsKHR alt = (overlayAlpha == "2")
+        ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR : VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
+      // On X11 the driver typically exposes only INHERIT (the per-pixel alpha comes from
+      // the window's ARGB visual); PRE/POST are mainly a Wayland thing. Try the requested
+      // mode, then the other, then INHERIT, before giving up to OPAQUE.
+      if (supported & want) swapInfo.compositeAlpha = want;
+      else if (supported & alt) swapInfo.compositeAlpha = alt;
+      else if (supported & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) swapInfo.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+      Logger::info(str::format("Layered overlay: compositeAlpha -> ", uint32_t(swapInfo.compositeAlpha),
+        " (surface supports ", uint32_t(supported), ")"));
+    }
+
     swapInfo.presentMode            = m_presentMode;
     swapInfo.clipped                = VK_TRUE;
 

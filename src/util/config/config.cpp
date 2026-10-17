@@ -293,10 +293,12 @@ namespace dxvk {
     { R"(\\MarySkelter2\.exe$)", {{
       { "d3d11.disableMsaa",                "True" },
     }} },
-    /* Final Fantasy XIV: Uses lots of HVV and    *
-     * also reads some uncached memory.           */
+    /* Final Fantasy XIV: Uses lots of HVV and reads uncached memory.
+     * Keep fullscreen on focus loss instead of restoring the saved small
+     * window, which drops Wine's fullscreen upscaling when using another monitor. */
     { R"(\\ffxiv_dx11\.exe$)", {{
       { "d3d11.cachedDynamicResources",       "vi" },
+      { "dxgi.keepFullscreenOnFocusLoss",   "True" },
     }} },
     /* Final Fantasy XV: VXAO does thousands of   *
      * draw calls with the same UAV bound         */
@@ -313,6 +315,10 @@ namespace dxvk {
     /* AoE 2 DE - runs poorly for some users      */
     { R"(\\AoE2DE_s\.exe$)", {{
       { "d3d11.cachedDynamicResources",        "a" },
+    }} },
+    /* Assassin's Creed DX10: keep fullscreen when focus moves away. */
+    { R"(\\AssassinsCreed_Dx10\.exe$)", {{
+      { "dxgi.keepFullscreenOnFocusLoss",   "True" },
     }} },
     /* Assassin's Creed 3 and 4                   */
     { R"(\\ac(3|4bf)[sm]p\.exe$)", {{
@@ -481,6 +487,11 @@ namespace dxvk {
     { R"(\\LEGOLCUR_DX11\.exe$)", {{
       { "d3d11.disableDirectImageMapping",  "True" },
     }} },
+    /* Black Desert: Wine preserves fullscreen on application deactivation.
+     * Do not independently leave it again when DXGI detects foreground loss. */
+    { R"(\\blackdesert64\.exe$)", {{
+      { "dxgi.keepFullscreenOnFocusLoss",   "True" },
+    }} },
     /* Wargame: European Escalation: Broken gamma   *
      * ramp when nvapi is available for some reason */
     { R"(\\Wargame European Escalation\\WarGame\.exe$)", {{
@@ -515,6 +526,17 @@ namespace dxvk {
     /* D3D9 GAMES                                 */
     /**********************************************/
 
+    /* Lineage II: Purple On probes D3D11 with a temporary fullscreen
+     * swapchain on the game's D3D9 window, without ever presenting. */
+    { R"(\\L2\.bin$)", {{
+      { "dxgi.deferSurfaceCreation",        "True" },
+      { "dxgi.deferInitialFullscreen",      "True" },
+    }} },
+
+    /* StarCraft II: avoid GPU hangs with constant buffer streaming. */
+    { R"(\\SC2(_x64)?\.exe$)", {{
+      { "d3d9.deviceLocalConstantBuffers", "False" },
+    }} },
     /* A Hat in Time                              */
     { R"(\\HatinTimeGame\.exe$)", {{
       { "d3d9.lenientClear",                "True" },

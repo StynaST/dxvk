@@ -40,6 +40,12 @@ namespace dxvk {
     m_factory->QueryInterface(__uuidof(IDXGIVkMonitorInfo), reinterpret_cast<void**>(&m_monitorInfo));
     
     // Apply initial window mode and fullscreen state
+    if (!m_descFs.Windowed && m_factory->GetOptions()->deferInitialFullscreen) {
+      // Temporary API probes must not change another renderer's window or display mode.
+      m_deferredFullscreen = true;
+      m_descFs.Windowed = TRUE;
+    }
+
     if (!m_descFs.Windowed && FAILED(EnterFullscreenMode(nullptr)))
     {
       Logger::warn("DXGI: EnterFullscreenMode failed. Creating a windowed swapchain instead.");
@@ -274,7 +280,8 @@ namespace dxvk {
           IDXGIOutput** ppTarget) {
     HRESULT hr = S_OK;
 
-    if (!m_is_d3d12 && !m_descFs.Windowed && wsi::isOccluded(m_window))
+    if (!m_is_d3d12 && !m_descFs.Windowed && wsi::isOccluded(m_window)
+     && (!m_factory->GetOptions()->keepFullscreenOnFocusLoss || wsi::isMinimized(m_window)))
       SetFullscreenState(FALSE, nullptr);
     if (pFullscreen != nullptr)
       *pFullscreen = !m_descFs.Windowed;
@@ -358,9 +365,24 @@ namespace dxvk {
 
     if ((m_desc.SwapEffect == DXGI_SWAP_EFFECT_DISCARD || m_desc.SwapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL) && wsi::isMinimized(m_window))
       return DXGI_STATUS_OCCLUDED;
-    bool occluded = !m_descFs.Windowed && wsi::isOccluded(m_window) && !wsi::isMinimized(m_window);
+
+    if (m_factory->GetOptions()->deferInitialFullscreen && !(PresentFlags & DXGI_PRESENT_TEST)) {
+      std::lock_guard<dxvk::recursive_mutex> lock(m_lockWindow);
+      if (m_deferredFullscreen) {
+        m_deferredFullscreen = false;
+        if (FAILED(EnterFullscreenMode(nullptr))) {
+          Logger::warn("DXGI: Deferred fullscreen transition failed. Keeping a windowed swapchain.");
+          m_descFs.Windowed = TRUE;
+        }
+      }
+    }
 
     auto options = m_factory->GetOptions();
+
+    // Wine can keep presenting fullscreen without owning keyboard focus.
+    // Do not report focus-only occlusion when preserving that presentation.
+    bool focusLost = !m_descFs.Windowed && wsi::isOccluded(m_window) && !wsi::isMinimized(m_window);
+    bool occluded = focusLost && !options->keepFullscreenOnFocusLoss;
 
     if (options->syncInterval >= 0)
       SyncInterval = options->syncInterval;
@@ -372,6 +394,9 @@ namespace dxvk {
 
     std::lock_guard<dxvk::recursive_mutex> lockWin(m_lockWindow);
     HRESULT hr = S_OK;
+
+    if (!(PresentFlags & DXGI_PRESENT_TEST) && !focusLost && !wsi::isMinimized(m_window))
+      UpdateFullscreenResolution();
 
     if (wsi::isWindow(m_window) || !m_window) {
       std::lock_guard<dxvk::mutex> lockBuf(m_lockBuffer);
@@ -441,6 +466,7 @@ namespace dxvk {
       return DXGI_ERROR_INVALID_CALL;
     
     std::lock_guard<dxvk::mutex> lock(m_lockBuffer);
+    VkExtent2D oldSize = { m_desc.Width, m_desc.Height };
     m_desc.Width  = Width;
     m_desc.Height = Height;
     m_desc.Flags  = SwapChainFlags;
@@ -461,6 +487,10 @@ namespace dxvk {
 
     if (FAILED(hr))
       return hr;
+
+    if (m_is_d3d12 && !m_fullscreenResizeFrom.width
+     && (oldSize.width != m_desc.Width || oldSize.height != m_desc.Height))
+      m_fullscreenResizeFrom = oldSize;
 
     UpdateSourceSize(m_desc.Width, m_desc.Height);
     UpdateColorSpace(m_desc.Format, m_colorSpace);
@@ -533,6 +563,9 @@ namespace dxvk {
 
     if (!Fullscreen && pTarget)
       return DXGI_ERROR_INVALID_CALL;
+
+    // Explicit application requests replace the deferred startup request.
+    m_deferredFullscreen = false;
 
     Com<IDXGIOutput1> target;
 
@@ -909,6 +942,63 @@ namespace dxvk {
   }
   
   
+  void DxgiSwapChain::UpdateFullscreenResolution() {
+    if (!m_is_d3d12 || m_ModeChangeInProgress)
+      return;
+
+    DXGI_SWAP_CHAIN_DESC1 desc;
+    VkExtent2D oldSize;
+
+    {
+      std::lock_guard<dxvk::mutex> lock(m_lockBuffer);
+      oldSize = m_fullscreenResizeFrom;
+      m_fullscreenResizeFrom = {};
+      desc = m_desc;
+    }
+
+    if (!oldSize.width || !oldSize.height || m_descFs.Windowed
+     || !(desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH))
+      return;
+
+    // A buffer-only resize is not a display-mode change. Only follow an app
+    // that also resized its fullscreen client from the old mode to the new one.
+    uint32_t width = 0, height = 0;
+    RECT bounds = {};
+    wsi::getWindowSize(m_window, &width, &height);
+    if (!wsi::getDesktopCoordinates(m_monitor, &bounds)
+     || width != desc.Width || height != desc.Height
+     || oldSize.width != uint32_t(bounds.right - bounds.left)
+     || oldSize.height != uint32_t(bounds.bottom - bounds.top)
+     || (width == oldSize.width && height == oldSize.height))
+      return;
+
+    Com<IDXGIOutput1> output;
+    if (FAILED(GetOutputFromMonitor(m_monitor, &output)))
+      return;
+
+    DXGI_MODE_DESC1 mode = {};
+    mode.Width = width;
+    mode.Height = height;
+    mode.RefreshRate = m_descFs.RefreshRate;
+    mode.Format = desc.Format;
+
+    DXGI_MODE_DESC1 selected = {};
+    if (FAILED(output->FindClosestMatchingMode1(&mode, &selected, nullptr))
+     || selected.Width != width || selected.Height != height)
+      return;
+
+    // This can deliver WM_SIZE and re-enter ResizeBuffers. The caller holds
+    // m_lockWindow, but m_lockBuffer must not be held across the mode change.
+    scoped_bool in_progress(m_ModeChangeInProgress);
+    if (FAILED(ChangeDisplayMode(output.ptr(), &mode))) {
+      Logger::warn("DXGI: Failed to update fullscreen resolution after client resize");
+      return;
+    }
+
+    wsi::updateFullscreenWindow(m_monitor, m_window, false);
+  }
+
+
   HRESULT DxgiSwapChain::RestoreDisplayMode(HMONITOR hMonitor) {
     if (!hMonitor)
       return DXGI_ERROR_INVALID_CALL;
@@ -1026,9 +1116,11 @@ namespace dxvk {
     if (ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709)
       return true;
 
-    // Only expose HDR10 color space if HDR option is enabled
+    // HDR10 requires both the opt-in and an HDR-enabled output.
     if (ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
-      return m_factory->GetOptions()->enableHDR && m_presenter->CheckColorSpaceSupport(ColorSpace);
+      return m_factory->GetOptions()->enableHDR
+          && wsi::isHdrEnabled(m_descFs.Windowed ? wsi::getWindowMonitor(m_window) : m_monitor)
+          && m_presenter->CheckColorSpaceSupport(ColorSpace);
 
     return false;
   }
