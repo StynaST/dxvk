@@ -497,9 +497,17 @@ namespace dxvk {
       Rc<DxvkImage> mappedImage = pResource->GetImage();
 
       if (MapType == D3D11_MAP_WRITE_DISCARD) {
+        void* prevData = pResource->GetMapPtr(Subresource, 0);
+        auto storage = pResource->DiscardStorage();
+
+        // The previous storage stays alive until the CS thread has
+        // processed this invalidation, so it is safe to read here.
+        if (m_parent->GetOptions()->preserveDynamicImageContents && prevData)
+          std::memcpy(storage->mapPtr(), prevData, layout.Offset + layout.Size);
+
         EmitCs([
           cImage = std::move(mappedImage),
-          cStorage = pResource->DiscardStorage()
+          cStorage = std::move(storage)
         ] (DxvkContext* ctx) {
           ctx->invalidateImage(cImage, Rc<DxvkResourceAllocation>(cStorage), VK_IMAGE_LAYOUT_PREINITIALIZED);
         });

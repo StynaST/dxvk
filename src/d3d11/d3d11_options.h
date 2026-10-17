@@ -83,6 +83,11 @@ namespace dxvk {
     /// an api trace.
     uint32_t cachedDynamicResources = 0;
 
+    /// Initialize the memory returned by WRITE_DISCARD maps of dynamic
+    /// images with the previously written data. Works around applications
+    /// that only rewrite the changed parts of a discarded dynamic texture.
+    bool preserveDynamicImageContents = false;
+
     /// Always lock immediate context on every API call. May be
     /// useful for debugging purposes or when applications have
     /// race conditions.

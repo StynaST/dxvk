@@ -564,6 +564,10 @@ namespace dxvk {
       Rc<DxvkBuffer>              buffer;
       Rc<DxvkResourceAllocation>  slice;
 
+      /* last unmapped buffer of a dynamic image, see preserveDynamicImageContents */
+      Rc<DxvkBuffer>              retainedBuffer;
+      Rc<DxvkResourceAllocation>  retainedSlice;
+
       std::vector<D3D11_COMMON_TEXTURE_REGION> dirtyRegions;
     };
 

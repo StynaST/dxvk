@@ -598,7 +598,8 @@ namespace dxvk {
 
     bool useCached = (m_device->GetOptions()->cachedDynamicResources == ~0u)
                   || (m_device->GetOptions()->cachedDynamicResources & m_desc.BindFlags)
-                  || (m_desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ);
+                  || (m_desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)
+                  || (m_device->GetOptions()->preserveDynamicImageContents);
 
     if (m_desc.Usage == D3D11_USAGE_STAGING || useCached)
       memoryFlags |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
@@ -872,20 +873,44 @@ namespace dxvk {
     VkMemoryPropertyFlags memType = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     
-    bool useCached = m_device->GetOptions()->cachedDynamicResources == ~0u;
+    bool preserve = m_desc.Usage == D3D11_USAGE_DYNAMIC
+      && m_device->GetOptions()->preserveDynamicImageContents;
+    bool useCached = m_device->GetOptions()->cachedDynamicResources == ~0u || preserve;
 
     if (m_desc.Usage == D3D11_USAGE_STAGING || useCached)
       memType |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 
     auto& entry = m_buffers[Subresource];
+
+    if (preserve && entry.retainedBuffer != nullptr
+     && !entry.retainedBuffer->isInUse(DxvkAccess::Read)) {
+      // The previous upload has completed, so the buffer can be reused as-is
+      entry.buffer = std::move(entry.retainedBuffer);
+      entry.slice = std::move(entry.retainedSlice);
+      return;
+    }
+
     entry.buffer = m_device->GetDXVKDevice()->createBuffer(info, memType);
     entry.slice = entry.buffer->storage();
+
+    if (preserve && entry.retainedBuffer != nullptr) {
+      std::memcpy(entry.slice->mapPtr(), entry.retainedSlice->mapPtr(), info.size);
+      entry.retainedBuffer = nullptr;
+      entry.retainedSlice = nullptr;
+    }
   }
 
 
   void D3D11CommonTexture::FreeMappedBuffer(
           UINT                  Subresource) {
     auto& entry = m_buffers[Subresource];
+
+    if (m_desc.Usage == D3D11_USAGE_DYNAMIC
+     && m_device->GetOptions()->preserveDynamicImageContents) {
+      entry.retainedBuffer = std::move(entry.buffer);
+      entry.retainedSlice = std::move(entry.slice);
+    }
+
     entry.buffer = nullptr;
     entry.slice = nullptr;
   }

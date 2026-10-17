@@ -389,6 +389,13 @@ namespace dxvk {
     { R"(\\GTA5\.exe$)", {{
       { "d3d11.cachedDynamicResources",       "vi" },
     }} },
+    /* FiveM: game process launched by the FiveM client.  *
+     * Its Wine NUI path rewrites only the dirty rects of  *
+     * a WRITE_DISCARD mapped dynamic texture              */
+    { R"(\\FiveM_(b[0-9]+_)?(GameProcess|GTAProcess)\.exe$)", {{
+      { "d3d11.cachedDynamicResources",       "vi" },
+      { "d3d11.preserveDynamicImageContents", "True" },
+    }} },
     /* Crash Bandicoot N. Sane Trilogy            *
      * Work around some vsync funkiness           */
     { R"(\\CrashBandicootNSaneTrilogy\.exe$)", {{
